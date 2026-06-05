@@ -245,7 +245,7 @@ int main(int argc, char *argv[])
     });
 
     auto search_component = CatchEvent(search_renderer, [&](Event e) {
-        if (e == Event::Return) {
+        if (e == Event::Character(' ')) {
             if (g_search.status == SearchStatus::DONE && !g_search.results.empty()) {
                 const auto &r = g_search.results[g_search.selected];
                 std::string magnet = "magnet:?xt=urn:btih:" + r.info_hash
@@ -256,6 +256,10 @@ int main(int argc, char *argv[])
                 screen.Post(Event::Custom);
                 return true;
             }
+            return false;
+        }
+
+        if (e == Event::Return) {
             trigger_search(screen, search_input_content);
             return true;
         }

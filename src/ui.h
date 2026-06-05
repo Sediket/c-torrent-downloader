@@ -241,7 +241,9 @@ static inline Element build_search_ui(const SearchState &s, Element input_el)
 
     auto footer = hbox({
         text(" [ENTER]") | color(Color::Cyan) | bold,
-        text(" Search/Select") | color(Color::GrayDark),
+        text(" Search") | color(Color::GrayDark),
+        text("   [SPACE]") | color(Color::Cyan) | bold,
+        text(" Download") | color(Color::GrayDark),
         text("   [") | color(Color::GrayDark),
         text("\xe2\x86\x91\xe2\x86\x93") | color(Color::Cyan) | bold,
         text("] Navigate") | color(Color::GrayDark),
