@@ -107,7 +107,7 @@ static inline Element build_dl_list_ui(const std::vector<DownloadEntry> &downloa
         text("   [") | color(Color::GrayDark),
         text("\xe2\x86\x91\xe2\x86\x93") | color(Color::Cyan) | bold,
         text("] Navigate") | color(Color::GrayDark),
-        text("   [Q]") | color(Color::Cyan) | bold,
+        text("   [CTRL+C]") | color(Color::Cyan) | bold,
         text(" Quit") | color(Color::GrayDark),
     });
 
@@ -247,7 +247,7 @@ static inline Element build_search_ui(const SearchState &s, Element input_el)
         text("] Navigate") | color(Color::GrayDark),
         text("   [TAB]") | color(Color::Cyan) | bold,
         text(" Switch") | color(Color::GrayDark),
-        text("   [Q]") | color(Color::Cyan) | bold,
+        text("   [CTRL+C]") | color(Color::Cyan) | bold,
         text(" Quit") | color(Color::GrayDark),
     });
 

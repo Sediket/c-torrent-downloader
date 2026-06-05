@@ -147,14 +147,7 @@ int main(int argc, char *argv[])
         }
 
         auto renderer = Renderer([&] { return build_dl_list_ui(g_downloads, 0); });
-        auto ui = CatchEvent(renderer, [&](Event e) {
-            if (e == Event::Character('q') || e == Event::Character('Q')) {
-                g_quit = true;
-                screen.ExitLoopClosure()();
-                return true;
-            }
-            return false;
-        });
+        auto ui = Renderer([&] { return build_dl_list_ui(g_downloads, 0); });
 
         std::thread dispatch_thread([&] { run_lt_dispatch(screen, ses); });
         screen.Loop(ui);
@@ -230,13 +223,7 @@ int main(int argc, char *argv[])
         return build_dl_list_ui(g_downloads, g_dl_selected);
     });
     auto dl_component = CatchEvent(dl_renderer, [&](Event e) {
-        if (e == Event::Character('q') || e == Event::Character('Q')) {
-            g_quit = true;
-            screen.ExitLoopClosure()();
-            return true;
-        }
-        if (e == Event::Tab || e == Event::TabReverse ||
-            e == Event::ArrowLeft || e == Event::ArrowRight) {
+        if (e == Event::ArrowLeft || e == Event::ArrowRight) {
             g_tab_index = (g_tab_index + 1) % 2;
             return true;
         }
@@ -258,20 +245,6 @@ int main(int argc, char *argv[])
     });
 
     auto search_component = CatchEvent(search_renderer, [&](Event e) {
-        if (e == Event::Character('q') || e == Event::Character('Q')) {
-            if (search_input_content.empty()) {
-                g_quit = true;
-                screen.ExitLoopClosure()();
-                return true;
-            }
-            return false;
-        }
-
-        if (e == Event::Tab || e == Event::TabReverse) {
-            g_tab_index = (g_tab_index + 1) % 2;
-            return true;
-        }
-
         if (e == Event::Return) {
             if (g_search.status == SearchStatus::DONE && !g_search.results.empty()) {
                 const auto &r = g_search.results[g_search.selected];
@@ -314,6 +287,13 @@ int main(int argc, char *argv[])
             tab_content->Render() | flex,
         });
     });
+    auto root_with_tab = CatchEvent(root_renderer, [&](Event e) {
+        if (e == Event::Tab || e == Event::TabReverse) {
+            g_tab_index = (g_tab_index + 1) % 2;
+            return true;
+        }
+        return false;
+    });
 
     // Spinner thread — animates while searching
     std::thread spinner_thread([&screen] {
@@ -330,7 +310,7 @@ int main(int argc, char *argv[])
     // Alert dispatch thread — polls libtorrent and updates g_downloads
     std::thread dispatch_thread([&] { run_lt_dispatch(screen, *g_ses); });
 
-    screen.Loop(root_renderer);
+    screen.Loop(root_with_tab);
 
     g_quit = true;
     spinner_thread.join();
