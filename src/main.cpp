@@ -456,19 +456,23 @@ static Element render_result_row(const SearchResult &r, bool selected, bool queu
     char size_buf[32];
     fmt_bytes(r.size, size_buf, sizeof(size_buf));
 
+    // Marker: ► for selected, ↓ for queued, space otherwise
+    std::string marker = selected ? " \xe2\x96\xba " : (queued ? " \xe2\x86\x93 " : "   ");
+    Color marker_col   = selected ? Color::Cyan : Color::MagentaLight;
+    Color name_col     = queued   ? Color::MagentaLight : Color::White;
+
     auto row = hbox({
-        text(selected ? " \xe2\x96\xba " : "   ") | color(Color::Cyan),
-        text(r.name) | color(Color::White) | flex,
+        text(marker) | color(marker_col),
+        text(r.name) | color(name_col) | flex,
         text(" "),
-        text(std::to_string(r.seeders))  | color(Color::Green)  | size(WIDTH, EQUAL, 7),
+        text(std::to_string(r.seeders))  | color(queued ? Color::MagentaLight : Color::Green)  | size(WIDTH, EQUAL, 7),
         text(" "),
-        text(std::to_string(r.leechers)) | color(Color::Red)    | size(WIDTH, EQUAL, 7),
+        text(std::to_string(r.leechers)) | color(queued ? Color::MagentaLight : Color::Red)    | size(WIDTH, EQUAL, 7),
         text(" "),
-        text(size_buf)                   | color(Color::Yellow) | size(WIDTH, EQUAL, 10),
+        text(size_buf)                   | color(queued ? Color::MagentaLight : Color::Yellow) | size(WIDTH, EQUAL, 10),
     });
 
     if (selected) return row | inverted;
-    if (queued)   return row | color(Color::MagentaLight);
     return row;
 }
 
