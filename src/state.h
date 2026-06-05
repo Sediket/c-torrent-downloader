@@ -59,3 +59,5 @@ extern int                             g_tab_index;
 extern std::string                     g_selected_magnet;
 extern std::string                     g_save_path;
 extern int                             g_listen_port;
+extern std::vector<std::string>        g_search_sources;
+extern int                             g_search_source_index;

@@ -152,6 +152,123 @@ static const char *SPINNER_FRAMES[] = {
 };
 static constexpr int SPINNER_COUNT = 8;
 
+// ── Config screen UI ──────────────────────────────────────────────────────────
+
+static inline Component build_config_ui(std::string& save_path,
+                                        std::vector<std::string>& sources,
+                                        int& source_index,
+                                        std::string& new_source)
+{
+    InputOption iopt;
+    iopt.multiline = false;
+    auto path_input   = Input(&save_path,  "e.g. C:\\Downloads", iopt);
+    auto source_input = Input(&new_source, "e.g. apibay.org",    iopt);
+
+    // menu_focused is written each render and read by the transform lambda.
+    // It lets us distinguish "active source" from "menu has keyboard focus".
+    bool menu_focused = false;
+
+    // Menu component — Up/Down navigate, selected index = active search source
+    MenuOption mopt = MenuOption::Vertical();
+    mopt.entries_option.transform = [&menu_focused](const EntryState& s) {
+        auto bullet = s.active ? text(" \xe2\x96\xb6 ") | color(Color::Cyan) | bold
+                               : text("   ");
+        auto label = text(s.label);
+        if (menu_focused && s.focused) label = label | bold | color(Color::Cyan);
+        else if (menu_focused && s.active) label = label | bold | color(Color::GreenLight);
+        else if (s.active)                 label = label | color(Color::White) | bold;
+        else                               label = label | color(Color::White);
+        return hbox({bullet, label});
+    };
+    auto sources_menu = Menu(&sources, &source_index, mopt);
+
+    // Wrap menu so Enter selects the active source and Delete removes it
+    auto sources_menu_handled = CatchEvent(sources_menu, [&](Event e) {
+        if (e == Event::Return) {
+            // already tracked via mopt.on_enter / source_index binding
+            return true;
+        }
+        if (e == Event::Delete) {
+            if (sources.size() > 1) {
+                sources.erase(sources.begin() + source_index);
+                source_index = std::min(source_index, (int)sources.size() - 1);
+            }
+            return true;
+        }
+        return false;
+    });
+
+    // Wrap add-source input so Enter appends and clears
+    auto source_input_handled = CatchEvent(source_input, [&](Event e) {
+        if (e == Event::Return && !new_source.empty()) {
+            sources.push_back(new_source);
+            new_source.clear();
+            return true;
+        }
+        return false;
+    });
+
+    auto container = Container::Vertical({
+        path_input,
+        sources_menu_handled,
+        source_input_handled,
+    });
+
+    return Renderer(container, [&, path_input, sources_menu, sources_menu_handled, source_input_handled] {
+        menu_focused = sources_menu->Focused();
+
+        auto header = hbox({
+            text(" \xe2\x98\x85 TORRENT-DL CONFIG \xe2\x98\x85 ") | bold | color(Color::Cyan),
+        }) | hcenter;
+
+        auto folder_row = hbox({
+            text(" DOWNLOAD FOLDER: ") | color(Color::Yellow) | bold,
+            path_input->Render() | flex,
+            text(" "),
+        });
+
+        auto add_row = hbox({
+            text(" + ") | color(Color::Yellow) | bold,
+            source_input_handled->Render() | flex,
+            text(" "),
+        });
+
+        auto sources_box = vbox({
+            text(" API HOSTS:") | color(Color::Yellow) | bold,
+            text("  \xe2\x80\xa2 must serve GET /q.php returning Pirate Bay JSON") | color(Color::GrayDark),
+            sources_menu_handled->Render(),
+            text("   \xe2\x86\x91\xe2\x86\x93 navigate  [ENTER] set active  [DEL] remove") | color(Color::GrayDark),
+            separator(),
+            text(" ADD API HOST:") | color(Color::Yellow) | bold,
+            add_row,
+            text("   hostname only (e.g. apibay.org) then [ENTER]") | color(Color::GrayDark),
+        });
+
+        auto body = vbox({
+            folder_row,
+            text("  \xe2\x80\xa2 \".\" means the current working directory") | color(Color::GrayDark),
+            text("  \xe2\x80\xa2 Changes take effect for the next download.") | color(Color::GrayDark),
+            separator(),
+            sources_box,
+        }) | flex;
+
+        auto footer = hbox({
+            text(" [TAB]") | color(Color::Cyan) | bold,
+            text(" Switch") | color(Color::GrayDark),
+            text("   [CTRL+C]") | color(Color::Cyan) | bold,
+            text(" Quit") | color(Color::GrayDark),
+        });
+
+        return vbox({
+            header,
+            separator(),
+            body,
+            separator(),
+            footer,
+        }) | borderDouble | color(Color::Cyan);
+    });
+}
+
 static inline Element build_search_ui(const SearchState &s, Element input_el)
 {
     auto header = hbox({
@@ -242,7 +359,7 @@ static inline Element build_search_ui(const SearchState &s, Element input_el)
     auto footer = hbox({
         text(" [ENTER]") | color(Color::Cyan) | bold,
         text(" Search") | color(Color::GrayDark),
-        text("   [SPACE]") | color(Color::Cyan) | bold,
+        text("   [CTRL+D]") | color(Color::Cyan) | bold,
         text(" Download") | color(Color::GrayDark),
         text("   [") | color(Color::GrayDark),
         text("\xe2\x86\x91\xe2\x86\x93") | color(Color::Cyan) | bold,

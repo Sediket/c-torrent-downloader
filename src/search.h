@@ -89,27 +89,39 @@ static inline void trigger_search(ScreenInteractive &screen, const std::string &
     g_search.spinner_frame = 0;
 
     std::string q = query;
-    std::thread([&screen, q] {
+    std::string source = g_search_sources.empty() ? "apibay.org"
+                       : g_search_sources[g_search_source_index];
+    std::thread([&screen, q, source] {
         try {
 #ifdef _WIN32
             std::string path_str = "/q.php?q=" + url_encode(q) + "&cat=0";
             std::wstring wpath(path_str.begin(), path_str.end());
-            std::string body = winhttp_get(L"apibay.org", wpath);
+            std::wstring whost(source.begin(), source.end());
+            std::string body = winhttp_get(whost, wpath);
 #else
             (void)q;
             std::string body = "[]";
 #endif
+            // apibay.org HTML-entity-escapes quotes inside JSON strings;
+            // fix before parsing to avoid malformed results.
+            for (size_t pos = 0; (pos = body.find("&quot;", pos)) != std::string::npos; )
+                body.replace(pos, 6, "\"");
+
             auto j = nlohmann::json::parse(body);
             std::vector<SearchResult> results;
 
             for (auto &item : j) {
+                // API returns a sentinel object instead of [] for no results.
+                std::string hash = item.value("info_hash", "");
+                if (hash.find_first_not_of('0') == std::string::npos && !hash.empty()) break;
+
                 std::string id = item.value("id", "0");
                 if (id == "0") break;
 
                 SearchResult r;
                 r.id        = id;
                 r.name      = item.value("name",      "");
-                r.info_hash = item.value("info_hash",  "");
+                r.info_hash = hash;
                 r.category  = item.value("category",   "");
                 try { r.seeders  = std::stoi(item.value("seeders",  "0")); } catch (...) {}
                 try { r.leechers = std::stoi(item.value("leechers", "0")); } catch (...) {}

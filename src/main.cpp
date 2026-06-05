@@ -45,6 +45,8 @@ int                             g_tab_index    = 0;
 std::string                     g_selected_magnet;
 std::string                     g_save_path    = ".";
 int                             g_listen_port  = 6881;
+std::vector<std::string>        g_search_sources = {"apibay.org"};
+int                             g_search_source_index = 0;
 
 // ── Signal handler ────────────────────────────────────────────────────────────
 
@@ -223,10 +225,6 @@ int main(int argc, char *argv[])
         return build_dl_list_ui(g_downloads, g_dl_selected);
     });
     auto dl_component = CatchEvent(dl_renderer, [&](Event e) {
-        if (e == Event::ArrowLeft || e == Event::ArrowRight) {
-            g_tab_index = (g_tab_index + 1) % 2;
-            return true;
-        }
         if (e == Event::ArrowDown) {
             if (!g_downloads.empty())
                 g_dl_selected = std::min(g_dl_selected + 1, (int)g_downloads.size() - 1);
@@ -239,13 +237,17 @@ int main(int argc, char *argv[])
         return false;
     });
 
+    std::string new_source_input;
+    auto config_component = build_config_ui(g_save_path, g_search_sources,
+                                            g_search_source_index, new_source_input);
+
     // Search screen component
     auto search_renderer = Renderer(search_input, [&] {
         return build_search_ui(g_search, search_input->Render());
     });
 
     auto search_component = CatchEvent(search_renderer, [&](Event e) {
-        if (e == Event::Character(' ')) {
+        if (e == Event::Special("\x04")) {
             if (g_search.status == SearchStatus::DONE && !g_search.results.empty()) {
                 const auto &r = g_search.results[g_search.selected];
                 std::string magnet = "magnet:?xt=urn:btih:" + r.info_hash
@@ -280,20 +282,31 @@ int main(int argc, char *argv[])
     });
 
     // Tab bar + content switcher
-    std::vector<std::string> tab_entries = {"[SEARCH]", "[DOWNLOADS]"};
-    auto tab_toggle  = Toggle(&tab_entries, &g_tab_index);
-    auto tab_content = Container::Tab({search_component, dl_component}, &g_tab_index);
-    auto root        = Container::Vertical({tab_toggle, tab_content});
-    auto root_renderer = Renderer(root, [&] {
+    // tab_entries is rendered manually — not wired as a focusable Toggle so the
+    // tab bar can never receive focus; only TAB/Shift+TAB switches pages.
+    std::vector<std::string> tab_entries = {"[SEARCH]", "[DOWNLOADS]", "[CONFIG]"};
+    auto tab_content = Container::Tab({search_component, dl_component, config_component}, &g_tab_index);
+    auto root_renderer = Renderer(tab_content, [&] {
+        // Build tab bar by hand so it is purely decorative.
+        std::vector<Element> tabs;
+        for (int i = 0; i < (int)tab_entries.size(); ++i) {
+            auto label = text(tab_entries[i]);
+            if (i == g_tab_index)
+                tabs.push_back(label | bold | color(Color::Cyan));
+            else
+                tabs.push_back(label | color(Color::GrayDark));
+            if (i + 1 < (int)tab_entries.size())
+                tabs.push_back(text("  "));
+        }
         return vbox({
-            tab_toggle->Render() | hcenter,
+            hbox(std::move(tabs)) | hcenter,
             separator(),
             tab_content->Render() | flex,
         });
     });
     auto root_with_tab = CatchEvent(root_renderer, [&](Event e) {
         if (e == Event::Tab || e == Event::TabReverse) {
-            g_tab_index = (g_tab_index + 1) % 2;
+            g_tab_index = (g_tab_index + 1) % 3;
             return true;
         }
         return false;
