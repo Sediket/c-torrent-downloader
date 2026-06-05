@@ -4,6 +4,8 @@
 #include <csignal>
 #include <string>
 #include <vector>
+#include <set>
+#include <mutex>
 #include <chrono>
 #include <thread>
 #include <atomic>
@@ -39,20 +41,31 @@ using namespace ftxui;
 
 static std::atomic<bool> g_quit{false};
 
-// Download state — only written via screen.Post() lambdas
-struct TorrentState {
-    float       progress     = 0.0f;
-    double      dl_rate      = 0.0;
-    double      ul_rate      = 0.0;
-    int         num_peers    = 0;
-    int64_t     total_done   = 0;
-    int64_t     total_wanted = 0;
-    std::string name;
-    std::string state_label  = "...";
-    bool        complete     = false;
+// Per-download entry — written only via screen.Post() lambdas
+struct DownloadEntry {
+    int                index        = 0;
+    std::string        name;
+    std::string        magnet;
+    lt::torrent_handle handle;
+    float              progress     = 0.0f;
+    double             dl_rate      = 0.0;
+    double             ul_rate      = 0.0;
+    int                num_peers    = 0;
+    int64_t            total_done   = 0;
+    int64_t            total_wanted = 0;
+    std::string        state_label  = "queued";
+    bool               complete     = false;
 };
 
-static TorrentState g_state;
+// All downloads ever started — append-only, reserve(64) prevents reallocation
+static std::vector<DownloadEntry>      g_downloads;
+static int                             g_dl_selected  = 0;
+static std::set<std::string>           g_queued_hashes;
+
+// Shared libtorrent session and handle list (protected by mutex)
+static lt::session                    *g_ses          = nullptr;
+static std::vector<lt::torrent_handle> g_handles;
+static std::mutex                      g_handles_mutex;
 
 // Search state
 struct SearchResult {
@@ -65,19 +78,19 @@ struct SearchResult {
 enum class SearchStatus { IDLE, LOADING, DONE, ERR };
 
 struct SearchState {
-    std::string              query;
+    std::string               query;
     std::vector<SearchResult> results;
-    int                      selected      = 0;
-    SearchStatus             status        = SearchStatus::IDLE;
-    std::string              error_msg;
-    size_t                   spinner_frame = 0;
+    int                       selected      = 0;
+    SearchStatus              status        = SearchStatus::IDLE;
+    std::string               error_msg;
+    size_t                    spinner_frame = 0;
 };
 
 static SearchState  g_search;
-static int          g_tab_index       = 0;   // 0 = search, 1 = download
+static int          g_tab_index    = 0;   // 0 = search, 1 = downloads
 static std::string  g_selected_magnet;
-static std::string  g_save_path       = ".";
-static int          g_listen_port     = 6881;
+static std::string  g_save_path    = ".";
+static int          g_listen_port  = 6881;
 
 // ── Signal handler ────────────────────────────────────────────────────────────
 
@@ -127,15 +140,6 @@ static void fmt_bytes(int64_t bytes, char *buf, size_t len)
         snprintf(buf, len, "%.1f KB", (double)bytes / 1024.0);
     else
         snprintf(buf, len, "%" PRId64 " B", bytes);
-}
-
-static std::string fmt_eta(int64_t remaining, double rate)
-{
-    if (rate < 1.0 || remaining <= 0) return "--:--";
-    long long s = static_cast<long long>(remaining / rate);
-    char buf[32];
-    snprintf(buf, sizeof(buf), "%lldm %02llds", s / 60, s % 60);
-    return buf;
 }
 
 // ── URL encode ────────────────────────────────────────────────────────────────
@@ -219,7 +223,7 @@ static void trigger_search(ScreenInteractive &screen, const std::string &query)
     if (query.empty()) return;
     if (g_search.status == SearchStatus::LOADING) return;
 
-    g_search.status  = SearchStatus::LOADING;
+    g_search.status       = SearchStatus::LOADING;
     g_search.results.clear();
     g_search.selected     = 0;
     g_search.spinner_frame = 0;
@@ -269,144 +273,177 @@ static void trigger_search(ScreenInteractive &screen, const std::string &query)
     }).detach();
 }
 
-// ── libtorrent polling loop (shared between direct-start and search-start) ────
+// ── libtorrent alert dispatch loop (single thread handles all torrents) ───────
 
-static void run_lt_loop(ScreenInteractive &screen, lt::session &ses,
-                         lt::torrent_handle h)
+static void run_lt_dispatch(ScreenInteractive &screen, lt::session &ses)
 {
     while (!g_quit) {
         std::vector<lt::alert *> alerts;
         ses.pop_alerts(&alerts);
 
         for (lt::alert *a : alerts) {
+            auto *ta = lt::alert_cast<lt::torrent_alert>(a);
+            if (!ta) continue;
+            lt::torrent_handle ah = ta->handle;
+
+            int idx = -1;
+            {
+                std::lock_guard<std::mutex> lk(g_handles_mutex);
+                for (int i = 0; i < (int)g_handles.size(); ++i) {
+                    if (g_handles[i] == ah) { idx = i; break; }
+                }
+            }
+            if (idx < 0) continue;
+
             if (lt::alert_cast<lt::torrent_error_alert>(a)) {
-                screen.Post([] { g_state.state_label = "ERROR"; });
+                screen.Post([idx] { g_downloads[idx].state_label = "ERROR"; });
             } else if (lt::alert_cast<lt::torrent_finished_alert>(a)) {
-                screen.Post([] {
-                    g_state.state_label = "DONE";
-                    g_state.complete    = true;
-                    g_state.progress    = 1.0f;
+                screen.Post([idx] {
+                    g_downloads[idx].state_label = "DONE";
+                    g_downloads[idx].complete    = true;
+                    g_downloads[idx].progress    = 1.0f;
                 });
-                screen.Post(Event::Custom);
-                std::this_thread::sleep_for(std::chrono::seconds(2));
-                g_quit = true;
-                screen.ExitLoopClosure()();
-                return;
             }
         }
 
-        if (g_quit) break;
-
-        lt::torrent_status st = h.status();
-        screen.Post([st] {
-            g_state.progress     = st.progress;
-            g_state.dl_rate      = st.download_rate;
-            g_state.ul_rate      = st.upload_rate;
-            g_state.num_peers    = st.num_peers;
-            g_state.total_done   = st.total_wanted_done;
-            g_state.total_wanted = st.total_wanted;
-            if (st.has_metadata && g_state.name.empty())
-                g_state.name = st.name;
-            switch (st.state) {
-                case lt::torrent_status::checking_files:
-                    g_state.state_label = "CHECKING"; break;
-                case lt::torrent_status::downloading_metadata:
-                    g_state.state_label = "METADATA"; break;
-                case lt::torrent_status::downloading:
-                    g_state.state_label = "DOWNLOADING"; break;
-                case lt::torrent_status::seeding:
-                    g_state.state_label = "SEEDING"; break;
-                default: break;
+        // Poll status for all active torrents
+        {
+            std::lock_guard<std::mutex> lk(g_handles_mutex);
+            for (int idx = 0; idx < (int)g_handles.size(); ++idx) {
+                if (g_downloads[idx].complete) continue;
+                lt::torrent_status st = g_handles[idx].status();
+                screen.Post([st, idx] {
+                    g_downloads[idx].progress     = st.progress;
+                    g_downloads[idx].dl_rate      = st.download_rate;
+                    g_downloads[idx].ul_rate      = st.upload_rate;
+                    g_downloads[idx].num_peers    = st.num_peers;
+                    g_downloads[idx].total_done   = st.total_wanted_done;
+                    g_downloads[idx].total_wanted = st.total_wanted;
+                    if (st.has_metadata && g_downloads[idx].name.empty())
+                        g_downloads[idx].name = st.name;
+                    switch (st.state) {
+                        case lt::torrent_status::checking_files:
+                            g_downloads[idx].state_label = "CHECKING";    break;
+                        case lt::torrent_status::downloading_metadata:
+                            g_downloads[idx].state_label = "METADATA";    break;
+                        case lt::torrent_status::downloading:
+                            g_downloads[idx].state_label = "DOWNLOADING"; break;
+                        case lt::torrent_status::seeding:
+                            g_downloads[idx].state_label = "SEEDING";     break;
+                        default: break;
+                    }
+                });
             }
-        });
+        }
+
         screen.Post(Event::Custom);
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
     screen.ExitLoopClosure()();
 }
 
-// ── Download screen UI builder ────────────────────────────────────────────────
+// ── Downloads list UI builder ─────────────────────────────────────────────────
 
-static Element build_dl_ui(const TorrentState &s)
+static Element render_dl_row(const DownloadEntry &e, bool selected)
 {
-    const int bar_width = 24;
-    int filled = static_cast<int>(s.progress * bar_width);
+    const int bar_width = 12;
+    int filled = static_cast<int>(e.progress * bar_width);
     std::string bar_str;
     for (int i = 0; i < bar_width; ++i)
         bar_str += (i < filled) ? "\xe2\x96\x88" : "\xe2\x96\x91";
 
-    char pct_buf[16];
-    snprintf(pct_buf, sizeof(pct_buf), " %5.1f%%", s.progress * 100.0f);
+    char pct_buf[8];
+    snprintf(pct_buf, sizeof(pct_buf), "%5.1f%%", e.progress * 100.0f);
 
-    char dl_buf[32], ul_buf[32], done_buf[32], total_buf[32];
-    fmt_rate(s.dl_rate,       dl_buf,    sizeof(dl_buf));
-    fmt_rate(s.ul_rate,       ul_buf,    sizeof(ul_buf));
-    fmt_bytes(s.total_done,   done_buf,  sizeof(done_buf));
-    fmt_bytes(s.total_wanted, total_buf, sizeof(total_buf));
-    std::string eta = fmt_eta(s.total_wanted - s.total_done, s.dl_rate);
+    char dl_buf[16];
+    fmt_rate(e.dl_rate, dl_buf, sizeof(dl_buf));
 
     Color state_col = Color::White;
-    if      (s.state_label == "DOWNLOADING") state_col = Color::GreenLight;
-    else if (s.state_label == "SEEDING")     state_col = Color::MagentaLight;
-    else if (s.state_label == "DONE")        state_col = Color::Cyan;
-    else if (s.state_label == "ERROR")       state_col = Color::Red;
-    else if (s.state_label == "CHECKING" ||
-             s.state_label == "METADATA")    state_col = Color::Yellow;
+    if      (e.state_label == "DOWNLOADING") state_col = Color::GreenLight;
+    else if (e.state_label == "SEEDING")     state_col = Color::MagentaLight;
+    else if (e.state_label == "DONE")        state_col = Color::Cyan;
+    else if (e.state_label == "ERROR")       state_col = Color::Red;
+    else if (e.state_label == "CHECKING" ||
+             e.state_label == "METADATA")    state_col = Color::Yellow;
+    else if (e.state_label == "queued")      state_col = Color::GrayDark;
 
-    std::string display_name = s.name.empty() ? "(fetching metadata...)" : s.name;
+    std::string display_name = e.name.empty() ? "(fetching metadata...)" : e.name;
 
+    auto row = hbox({
+        text(selected ? " \xe2\x96\xba " : "   ") | color(Color::Cyan),
+        text(display_name) | color(Color::White) | flex,
+        text(" ["),
+        text(bar_str) | color(Color::Green),
+        text("] "),
+        text(pct_buf) | color(Color::White) | size(WIDTH, EQUAL, 7),
+        text("  "),
+        text(dl_buf) | color(Color::GreenLight) | size(WIDTH, EQUAL, 10),
+        text("  "),
+        text(e.state_label) | bold | color(state_col) | size(WIDTH, EQUAL, 12),
+    });
+
+    if (selected) return row | inverted;
+    return row;
+}
+
+static Element build_dl_list_ui(const std::vector<DownloadEntry> &downloads, int selected)
+{
     auto header = hbox({
         text(" \xe2\x98\x85 TORRENT-DL v1.0 \xe2\x98\x85 ") | bold | color(Color::Cyan),
     }) | hcenter;
 
-    auto name_row = hbox({
-        text(" "),
-        text(display_name) | color(Color::Yellow) | flex,
-    });
+    Element body;
 
-    auto bar_row = hbox({
-        text(" ["),
-        text(bar_str) | color(Color::Green),
-        text("]"),
-        text(pct_buf) | bold | color(Color::White),
-    });
+    if (downloads.empty()) {
+        body = vbox({
+            filler(),
+            hbox({
+                filler(),
+                text("  \xe2\x97\x86 No downloads yet.") | color(Color::GrayDark),
+                text(" Switch to Search") | color(Color::Cyan),
+                text(" and press") | color(Color::GrayDark),
+                text(" [ENTER]") | color(Color::Cyan) | bold,
+                text(" on a result.  \xe2\x97\x86") | color(Color::GrayDark),
+                filler(),
+            }),
+            filler(),
+        }) | flex;
+    } else {
+        auto col_header = hbox({
+            text("   ") | color(Color::Cyan),
+            text("NAME") | color(Color::Cyan) | bold | flex,
+            text(" PROGRESS       ") | color(Color::Cyan) | bold,
+            text("  DL          ") | color(Color::Cyan) | bold,
+            text("  STATE       ") | color(Color::Cyan) | bold,
+        });
 
-    auto stats1 = hbox({
-        text(" DL: ") | color(Color::GrayDark),
-        text(dl_buf) | color(Color::GreenLight),
-        text("   UL: ") | color(Color::GrayDark),
-        text(ul_buf) | color(Color::Yellow),
-    });
+        Elements rows;
+        rows.push_back(col_header);
+        rows.push_back(separatorDouble());
 
-    auto stats2 = hbox({
-        text(" PEERS: ") | color(Color::GrayDark),
-        text(std::to_string(s.num_peers)) | color(Color::White),
-        text("   ETA: ") | color(Color::GrayDark),
-        text(eta) | color(Color::White),
-        text("   "),
-        text(s.state_label) | bold | color(state_col),
-    });
+        for (int i = 0; i < (int)downloads.size(); ++i) {
+            bool sel = (i == selected);
+            auto row_el = render_dl_row(downloads[i], sel);
+            rows.push_back(sel ? (row_el | focus) : row_el);
+        }
 
-    auto stats3 = hbox({
-        text(" ") | color(Color::GrayDark),
-        text(done_buf) | color(Color::White),
-        text(" / ") | color(Color::GrayDark),
-        text(total_buf) | color(Color::White),
-    });
+        body = vbox(std::move(rows)) | vscroll_indicator | yframe | flex;
+    }
 
     auto footer = hbox({
-        text(" [Q] Quit") | color(Color::GrayDark),
+        text(" [TAB]") | color(Color::Cyan) | bold,
+        text(" Switch") | color(Color::GrayDark),
+        text("   [") | color(Color::GrayDark),
+        text("\xe2\x86\x91\xe2\x86\x93") | color(Color::Cyan) | bold,
+        text("] Navigate") | color(Color::GrayDark),
+        text("   [Q]") | color(Color::Cyan) | bold,
+        text(" Quit") | color(Color::GrayDark),
     });
 
     return vbox({
         header,
         separator(),
-        name_row,
-        separator(),
-        bar_row,
-        stats1,
-        stats2,
-        stats3,
+        body,
         separator(),
         footer,
     }) | borderDouble | color(Color::Cyan);
@@ -414,7 +451,7 @@ static Element build_dl_ui(const TorrentState &s)
 
 // ── Search screen UI builder ──────────────────────────────────────────────────
 
-static Element render_result_row(const SearchResult &r, bool selected)
+static Element render_result_row(const SearchResult &r, bool selected, bool queued)
 {
     char size_buf[32];
     fmt_bytes(r.size, size_buf, sizeof(size_buf));
@@ -431,6 +468,7 @@ static Element render_result_row(const SearchResult &r, bool selected)
     });
 
     if (selected) return row | inverted;
+    if (queued)   return row | color(Color::MagentaLight);
     return row;
 }
 
@@ -502,7 +540,6 @@ static Element build_search_ui(const SearchState &s, Element input_el)
                 filler(),
             }) | flex;
         } else {
-            // Column headers
             auto col_header = hbox({
                 text("   ") | color(Color::Cyan),
                 text("NAME") | color(Color::Cyan) | bold | flex,
@@ -519,12 +556,10 @@ static Element build_search_ui(const SearchState &s, Element input_el)
             rows.push_back(separatorDouble());
 
             for (int i = 0; i < (int)s.results.size(); ++i) {
-                bool sel = (i == s.selected);
-                auto row_el = render_result_row(s.results[i], sel);
-                if (sel)
-                    rows.push_back(row_el | focus);
-                else
-                    rows.push_back(row_el);
+                bool sel    = (i == s.selected);
+                bool queued = g_queued_hashes.count(s.results[i].info_hash) > 0;
+                auto row_el = render_result_row(s.results[i], sel, queued);
+                rows.push_back(sel ? (row_el | focus) : row_el);
             }
 
             body = vbox(std::move(rows)) | vscroll_indicator | yframe | flex;
@@ -537,6 +572,8 @@ static Element build_search_ui(const SearchState &s, Element input_el)
         text("   [") | color(Color::GrayDark),
         text("\xe2\x86\x91\xe2\x86\x93") | color(Color::Cyan) | bold,
         text("] Navigate") | color(Color::GrayDark),
+        text("   [TAB]") | color(Color::Cyan) | bold,
+        text(" Switch") | color(Color::GrayDark),
         text("   [Q]") | color(Color::Cyan) | bold,
         text(" Quit") | color(Color::GrayDark),
     });
@@ -600,6 +637,10 @@ int main(int argc, char *argv[])
         atp.save_path = g_save_path;
         lt::error_code ec;
 
+        g_downloads.reserve(1);
+        DownloadEntry cli_entry;
+        cli_entry.index = 0;
+
         if (is_magnet(source)) {
             atp = lt::parse_magnet_uri(source, ec);
             if (ec) {
@@ -613,8 +654,8 @@ int main(int argc, char *argv[])
                 fprintf(stderr, "Failed to load torrent file: %s\n", ec.message().c_str());
                 return 1;
             }
-            atp.ti = ti;
-            g_state.name = ti->name();
+            atp.ti       = ti;
+            cli_entry.name = ti->name();
         }
 
         lt::torrent_handle h = ses.add_torrent(std::move(atp), ec);
@@ -623,7 +664,14 @@ int main(int argc, char *argv[])
             return 1;
         }
 
-        auto renderer = Renderer([&] { return build_dl_ui(g_state); });
+        cli_entry.handle = h;
+        g_downloads.push_back(cli_entry);
+        {
+            std::lock_guard<std::mutex> lk(g_handles_mutex);
+            g_handles.push_back(h);
+        }
+
+        auto renderer = Renderer([&] { return build_dl_list_ui(g_downloads, 0); });
         auto ui = CatchEvent(renderer, [&](Event e) {
             if (e == Event::Character('q') || e == Event::Character('Q')) {
                 g_quit = true;
@@ -633,10 +681,10 @@ int main(int argc, char *argv[])
             return false;
         });
 
-        std::thread lt_thread([&] { run_lt_loop(screen, ses, h); });
+        std::thread dispatch_thread([&] { run_lt_dispatch(screen, ses); });
         screen.Loop(ui);
         g_quit = true;
-        lt_thread.join();
+        dispatch_thread.join();
         h.save_resume_data();
         ses.pause();
         return 0;
@@ -644,8 +692,19 @@ int main(int argc, char *argv[])
 
     // ── Search-first mode ─────────────────────────────────────────────────────
 
-    // libtorrent session is heap-allocated when download starts
-    lt::session *g_ses = nullptr;
+    g_downloads.reserve(64);
+
+    // Create shared libtorrent session up front
+    {
+        lt::settings_pack sp;
+        sp.set_int(lt::settings_pack::alert_mask,
+            lt::alert_category::error   |
+            lt::alert_category::status  |
+            lt::alert_category::storage);
+        sp.set_str(lt::settings_pack::listen_interfaces,
+            "0.0.0.0:" + std::to_string(g_listen_port));
+        g_ses = new lt::session(sp);
+    }
 
     std::string search_input_content;
 
@@ -654,34 +713,33 @@ int main(int argc, char *argv[])
 
     auto search_input = Input(&search_input_content, "Search torrents...", input_opt);
 
-    // Download screen component (starts invisible — Container::Tab hides it)
-    auto dl_renderer = Renderer([&] { return build_dl_ui(g_state); });
-    auto dl_component = CatchEvent(dl_renderer, [&](Event e) {
-        if (e == Event::Character('q') || e == Event::Character('Q')) {
-            g_quit = true;
-            screen.ExitLoopClosure()();
-            return true;
+    // start_download — called when user selects a result from search
+    auto start_download = [&](const std::string &magnet,
+                               const std::string &info_hash,
+                               const std::string &display_name) {
+        if (g_queued_hashes.count(info_hash)) return;
+        g_queued_hashes.insert(info_hash);
+
+        DownloadEntry entry;
+        entry.index       = static_cast<int>(g_downloads.size());
+        entry.name        = display_name;
+        entry.magnet      = magnet;
+        entry.state_label = "queued";
+        g_downloads.push_back(entry);
+
+        int idx = entry.index;
+
+        // Pre-allocate the handle slot so the index is always in sync
+        {
+            std::lock_guard<std::mutex> lk(g_handles_mutex);
+            g_handles.emplace_back();  // placeholder, replaced once add_torrent succeeds
         }
-        return false;
-    });
 
-    // start_download — called when user selects a result
-    auto start_download = [&] {
-        std::thread([&screen, &g_ses] {
-            lt::settings_pack sp;
-            sp.set_int(lt::settings_pack::alert_mask,
-                lt::alert_category::error   |
-                lt::alert_category::status  |
-                lt::alert_category::storage);
-            sp.set_str(lt::settings_pack::listen_interfaces,
-                "0.0.0.0:" + std::to_string(g_listen_port));
-
-            g_ses = new lt::session(sp);
-
+        std::thread([&screen, idx, magnet] {
             lt::error_code ec;
-            lt::add_torrent_params atp = lt::parse_magnet_uri(g_selected_magnet, ec);
+            lt::add_torrent_params atp = lt::parse_magnet_uri(magnet, ec);
             if (ec) {
-                screen.Post([] { g_state.state_label = "ERROR"; });
+                screen.Post([idx] { g_downloads[idx].state_label = "ERROR"; });
                 screen.Post(Event::Custom);
                 return;
             }
@@ -689,18 +747,47 @@ int main(int argc, char *argv[])
 
             lt::torrent_handle h = g_ses->add_torrent(std::move(atp), ec);
             if (ec) {
-                screen.Post([] { g_state.state_label = "ERROR"; });
+                screen.Post([idx] { g_downloads[idx].state_label = "ERROR"; });
                 screen.Post(Event::Custom);
                 return;
             }
 
-            // Switch to download view
-            screen.Post([] { g_tab_index = 1; });
+            // Store handle at the reserved slot — dispatch thread matches by handle
+            {
+                std::lock_guard<std::mutex> lk(g_handles_mutex);
+                g_handles[idx] = h;
+            }
+            screen.Post([idx, h] { g_downloads[idx].handle = h; });
             screen.Post(Event::Custom);
-
-            run_lt_loop(screen, *g_ses, h);
         }).detach();
     };
+
+    // Downloads screen component
+    auto dl_renderer = Renderer([&] {
+        return build_dl_list_ui(g_downloads, g_dl_selected);
+    });
+    auto dl_component = CatchEvent(dl_renderer, [&](Event e) {
+        if (e == Event::Character('q') || e == Event::Character('Q')) {
+            g_quit = true;
+            screen.ExitLoopClosure()();
+            return true;
+        }
+        if (e == Event::Tab || e == Event::TabReverse ||
+            e == Event::ArrowLeft || e == Event::ArrowRight) {
+            g_tab_index = (g_tab_index + 1) % 2;
+            return true;
+        }
+        if (e == Event::ArrowDown) {
+            if (!g_downloads.empty())
+                g_dl_selected = std::min(g_dl_selected + 1, (int)g_downloads.size() - 1);
+            return true;
+        }
+        if (e == Event::ArrowUp) {
+            g_dl_selected = std::max(g_dl_selected - 1, 0);
+            return true;
+        }
+        return false;
+    });
 
     // Search screen component
     auto search_renderer = Renderer(search_input, [&] {
@@ -708,9 +795,8 @@ int main(int argc, char *argv[])
     });
 
     auto search_component = CatchEvent(search_renderer, [&](Event e) {
-        // Q to quit
+        // Q to quit (only when input is empty to avoid eating 'q' while typing)
         if (e == Event::Character('q') || e == Event::Character('Q')) {
-            // only quit from search screen if input is empty (avoid eating 'q' while typing)
             if (search_input_content.empty()) {
                 g_quit = true;
                 screen.ExitLoopClosure()();
@@ -719,21 +805,25 @@ int main(int argc, char *argv[])
             return false;
         }
 
-        // Enter: either search (if IDLE/DONE/ERR) or select result (if DONE and non-empty)
+        // Tab / Shift-Tab to switch tabs
+        if (e == Event::Tab || e == Event::TabReverse) {
+            g_tab_index = (g_tab_index + 1) % 2;
+            return true;
+        }
+
+        // Enter: select result (if DONE and non-empty) or trigger search
         if (e == Event::Return) {
             if (g_search.status == SearchStatus::DONE && !g_search.results.empty()) {
-                // Select current result
                 const auto &r = g_search.results[g_search.selected];
-                g_selected_magnet = "magnet:?xt=urn:btih:" + r.info_hash
+                std::string magnet = "magnet:?xt=urn:btih:" + r.info_hash
                     + "&dn=" + url_encode(r.name)
                     + "&tr=udp://tracker.opentrackr.org:1337/announce"
                     + "&tr=udp://tracker.openbittorrent.com:6969/announce"
                     + "&tr=udp://open.demonii.com:1337/announce";
-                g_state.name = r.name;
-                start_download();
+                start_download(magnet, r.info_hash, r.name);
+                screen.Post(Event::Custom);
                 return true;
             }
-            // Otherwise let the Input's on_enter fire (handled below)
             trigger_search(screen, search_input_content);
             return true;
         }
@@ -754,8 +844,18 @@ int main(int argc, char *argv[])
         return false;
     });
 
-    // Root: Tab between search and download
-    auto root = Container::Tab({search_component, dl_component}, &g_tab_index);
+    // Tab bar + content switcher
+    std::vector<std::string> tab_entries = {"[SEARCH]", "[DOWNLOADS]"};
+    auto tab_toggle  = Toggle(&tab_entries, &g_tab_index);
+    auto tab_content = Container::Tab({search_component, dl_component}, &g_tab_index);
+    auto root        = Container::Vertical({tab_toggle, tab_content});
+    auto root_renderer = Renderer(root, [&] {
+        return vbox({
+            tab_toggle->Render() | hcenter,
+            separator(),
+            tab_content->Render() | flex,
+        });
+    });
 
     // Spinner thread — animates while searching
     std::thread spinner_thread([&screen] {
@@ -769,14 +869,19 @@ int main(int argc, char *argv[])
         }
     });
 
-    screen.Loop(root);
+    // Alert dispatch thread — polls libtorrent and updates g_downloads
+    std::thread dispatch_thread([&] { run_lt_dispatch(screen, *g_ses); });
+
+    screen.Loop(root_renderer);
 
     g_quit = true;
     spinner_thread.join();
+    dispatch_thread.join();
 
     if (g_ses) {
         g_ses->pause();
         delete g_ses;
+        g_ses = nullptr;
     }
 
     return 0;
