@@ -45,7 +45,7 @@ endif()
 add_executable(torrent-dl src/main.cpp)
 
 target_compile_options(torrent-dl PRIVATE
-    $<$<CXX_COMPILER_ID:MSVC>:/W4>
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive->
     $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra>
 )
 
