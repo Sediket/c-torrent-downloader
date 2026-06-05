@@ -107,6 +107,8 @@ static inline Element build_dl_list_ui(const std::vector<DownloadEntry> &downloa
         text("   [") | color(Color::GrayDark),
         text("\xe2\x86\x91\xe2\x86\x93") | color(Color::Cyan) | bold,
         text("] Navigate") | color(Color::GrayDark),
+        text("   [X]") | color(Color::Cyan) | bold,
+        text(" Cancel & Delete") | color(Color::GrayDark),
         text("   [CTRL+C]") | color(Color::Cyan) | bold,
         text(" Quit") | color(Color::GrayDark),
     });
@@ -246,7 +248,7 @@ static inline Component build_config_ui(std::string& save_path,
 
         auto body = vbox({
             folder_row,
-            text("  \xe2\x80\xa2 \".\" means the current working directory") | color(Color::GrayDark),
+            text("  \xe2\x80\xa2 path is relative to the current working directory") | color(Color::GrayDark),
             text("  \xe2\x80\xa2 Changes take effect for the next download.") | color(Color::GrayDark),
             separator(),
             sources_box,

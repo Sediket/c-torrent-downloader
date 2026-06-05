@@ -43,7 +43,7 @@ std::mutex                      g_handles_mutex;
 SearchState                     g_search;
 int                             g_tab_index    = 0;
 std::string                     g_selected_magnet;
-std::string                     g_save_path    = ".";
+std::string                     g_save_path    = "./downloads";
 int                             g_listen_port  = 6881;
 std::vector<std::string>        g_search_sources = {"apibay.org"};
 int                             g_search_source_index = 0;
@@ -184,6 +184,7 @@ int main(int argc, char *argv[])
         entry.index       = static_cast<int>(g_downloads.size());
         entry.name        = display_name;
         entry.magnet      = magnet;
+        entry.info_hash   = info_hash;
         entry.state_label = "queued";
         g_downloads.push_back(entry);
 
@@ -220,8 +221,9 @@ int main(int argc, char *argv[])
         }).detach();
     };
 
-    // Downloads screen component
-    auto dl_renderer = Renderer([&] {
+    // Downloads screen component — uses the (bool focused) Renderer overload
+    // so the component is focusable and CatchEvent receives key events.
+    auto dl_renderer = Renderer([&](bool) {
         return build_dl_list_ui(g_downloads, g_dl_selected);
     });
     auto dl_component = CatchEvent(dl_renderer, [&](Event e) {
@@ -232,6 +234,24 @@ int main(int argc, char *argv[])
         }
         if (e == Event::ArrowUp) {
             g_dl_selected = std::max(g_dl_selected - 1, 0);
+            return true;
+        }
+        // X — cancel selected download and delete all local files
+        if (e == Event::Character('x')) {
+            int idx = g_dl_selected;
+            if (idx >= 0 && idx < (int)g_downloads.size()) {
+                {
+                    std::lock_guard<std::mutex> lk(g_handles_mutex);
+                    if (idx < (int)g_handles.size() && g_handles[idx].is_valid())
+                        g_ses->remove_torrent(g_handles[idx],
+                                              lt::session_handle::delete_files);
+                    g_handles.erase(g_handles.begin() + idx);
+                }
+                g_queued_hashes.erase(g_downloads[idx].info_hash);
+                g_downloads.erase(g_downloads.begin() + idx);
+                g_dl_selected = std::max(0, std::min(g_dl_selected,
+                                                     (int)g_downloads.size() - 1));
+            }
             return true;
         }
         return false;

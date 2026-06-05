@@ -86,6 +86,11 @@ Global definitions, signal handler, `print_usage`/`is_magnet` CLI helpers, and
    `start_download` lambda, search/download components, tab layout, spinner
    thread, dispatch thread, then `screen.Loop`.
 
+## Coding and Troubleshooting Guidance
+- Use Official sites and documentation as examples of working code.
+- Use other GitHub projects as references as examples of working code.
+
+
 ## Build
 
 ```powershell
@@ -98,6 +103,9 @@ cmake --build build --config Release
 # Windows — MSYS2 (run inside MSYS2 shell)
 cmake -B build -DCMAKE_BUILD_TYPE=Release -G "MinGW Makefiles"
 cmake --build build
+
+# Compile script
+build.ps1
 ```
 
 See `BUILD.md` for all platforms.

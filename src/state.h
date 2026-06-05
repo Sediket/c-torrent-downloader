@@ -16,6 +16,7 @@ struct DownloadEntry {
     int                index        = 0;
     std::string        name;
     std::string        magnet;
+    std::string        info_hash;
     lt::torrent_handle handle;
     float              progress     = 0.0f;
     double             dl_rate      = 0.0;
