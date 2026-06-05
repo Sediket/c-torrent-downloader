@@ -28,16 +28,59 @@ set(JSON_Install    OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(nlohmann_json)
 
 # ── Find libtorrent ──────────────────────────────────────────────────────────
-# Supports both libtorrent-rasterbar installed via vcpkg, system package
-# manager, or a manual prefix passed with -DCMAKE_PREFIX_PATH=<path>.
+# Supports libtorrent-rasterbar installed via vcpkg, system package manager,
+# or a manual prefix passed with -DCMAKE_PREFIX_PATH=<path>.
 
 find_package(LibtorrentRasterbar QUIET)
 
+# Verify the imported target actually resolved a library on disk.
+# vcpkg's LibtorrentRasterbarConfig.cmake can find the config file yet leave
+# IMPORTED_LOCATION empty when its Boost find_dependency triggers a warning,
+# causing silent link failures.  Fall back to find_library in that case.
+if(LibtorrentRasterbar_FOUND AND TARGET LibtorrentRasterbar::torrent-rasterbar)
+    get_target_property(_lt_loc LibtorrentRasterbar::torrent-rasterbar
+                        IMPORTED_LOCATION_RELEASE)
+    if(NOT _lt_loc)
+        get_target_property(_lt_loc LibtorrentRasterbar::torrent-rasterbar
+                            IMPORTED_LOCATION)
+    endif()
+    if(NOT _lt_loc)
+        message(STATUS "LibtorrentRasterbar target has no IMPORTED_LOCATION — falling back to find_library")
+        set(LibtorrentRasterbar_FOUND FALSE)
+    endif()
+endif()
+
 if(NOT LibtorrentRasterbar_FOUND)
-    # Fallback: try pkg-config (Linux / MSYS2 / Homebrew)
-    find_package(PkgConfig QUIET)
-    if(PkgConfig_FOUND)
-        pkg_check_modules(LIBTORRENT REQUIRED libtorrent-rasterbar)
+    # Direct library search — works reliably with vcpkg static triplets
+    find_library(LIBTORRENT_LIB
+        NAMES torrent-rasterbar
+        PATH_SUFFIXES lib
+    )
+    find_path(LIBTORRENT_INCLUDE_DIR
+        NAMES libtorrent/session.hpp
+        PATH_SUFFIXES include
+    )
+    if(LIBTORRENT_LIB AND LIBTORRENT_INCLUDE_DIR)
+        message(STATUS "Found libtorrent via find_library: ${LIBTORRENT_LIB}")
+        set(LIBTORRENT_FOUND TRUE)
+    else()
+        # Last resort: try pkg-config (Linux / MSYS2 / Homebrew)
+        find_package(PkgConfig QUIET)
+        if(PkgConfig_FOUND)
+            pkg_check_modules(LIBTORRENT libtorrent-rasterbar)
+        endif()
+        if(NOT LIBTORRENT_FOUND)
+            message(FATAL_ERROR
+                "libtorrent-rasterbar not found.\n"
+                "Install it via one of:\n"
+                "  vcpkg:  vcpkg install libtorrent:x64-windows-static\n"
+                "  MSYS2 (ucrt64): pacman -S mingw-w64-ucrt-x86_64-libtorrent-rasterbar\n"
+                "  MSYS2 (mingw64): pacman -S mingw-w64-x86_64-libtorrent-rasterbar\n"
+                "  Ubuntu: apt install libtorrent-rasterbar-dev\n"
+                "  macOS:  brew install libtorrent-rasterbar\n"
+                "Then re-run cmake with -DCMAKE_PREFIX_PATH pointing to the install root.\n"
+            )
+        endif()
     endif()
 endif()
 
@@ -57,6 +100,13 @@ if(LibtorrentRasterbar_FOUND)
         ftxui::screen ftxui::dom ftxui::component
         nlohmann_json::nlohmann_json
         $<$<PLATFORM_ID:Windows>:winhttp>)
+elseif(LIBTORRENT_FOUND AND LIBTORRENT_LIB)
+    target_include_directories(torrent-dl PRIVATE ${LIBTORRENT_INCLUDE_DIR})
+    target_link_libraries(torrent-dl PRIVATE
+        ${LIBTORRENT_LIB}
+        ftxui::screen ftxui::dom ftxui::component
+        nlohmann_json::nlohmann_json
+        $<$<PLATFORM_ID:Windows>:winhttp>)
 elseif(LIBTORRENT_FOUND)
     target_include_directories(torrent-dl PRIVATE ${LIBTORRENT_INCLUDE_DIRS})
     target_link_directories(torrent-dl PRIVATE ${LIBTORRENT_LIBRARY_DIRS})
@@ -66,17 +116,6 @@ elseif(LIBTORRENT_FOUND)
         nlohmann_json::nlohmann_json
         $<$<PLATFORM_ID:Windows>:winhttp>)
     target_compile_options(torrent-dl PRIVATE ${LIBTORRENT_CFLAGS_OTHER})
-else()
-    message(FATAL_ERROR
-        "libtorrent-rasterbar not found.\n"
-        "Install it via one of:\n"
-        "  vcpkg:  vcpkg install libtorrent:x64-windows\n"
-        "  MSYS2 (ucrt64): pacman -S mingw-w64-ucrt-x86_64-libtorrent-rasterbar\n"
-        "  MSYS2 (mingw64): pacman -S mingw-w64-x86_64-libtorrent-rasterbar\n"
-        "  Ubuntu: apt install libtorrent-rasterbar-dev\n"
-        "  macOS:  brew install libtorrent-rasterbar\n"
-        "Then re-run cmake with -DCMAKE_PREFIX_PATH pointing to the install root.\n"
-    )
 endif()
 
 install(TARGETS torrent-dl RUNTIME DESTINATION bin)
