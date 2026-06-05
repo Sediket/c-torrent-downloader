@@ -49,6 +49,8 @@ target_compile_options(torrent-dl PRIVATE
     $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra>
 )
 
+target_compile_definitions(torrent-dl PRIVATE TORRENT_ABI_VERSION=1)
+
 if(LibtorrentRasterbar_FOUND)
     target_link_libraries(torrent-dl PRIVATE
         LibtorrentRasterbar::torrent-rasterbar
