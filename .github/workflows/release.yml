@@ -35,13 +35,15 @@ jobs:
 
       - name: Install libtorrent via vcpkg
         run: |
-          vcpkg install libtorrent:x64-windows
+          vcpkg install libtorrent:x64-windows-static
           echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
 
       - name: Configure
         run: >
           cmake -B build -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          -DVCPKG_TARGET_TRIPLET=x64-windows-static
+          -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
 
       - name: Build
         run: cmake --build build --config Release
