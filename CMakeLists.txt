@@ -92,21 +92,19 @@ target_compile_options(torrent-dl PRIVATE
     $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra>
 )
 
-target_compile_definitions(torrent-dl PRIVATE TORRENT_ABI_VERSION=1)
-
 if(LibtorrentRasterbar_FOUND)
     target_link_libraries(torrent-dl PRIVATE
         LibtorrentRasterbar::torrent-rasterbar
         ftxui::screen ftxui::dom ftxui::component
         nlohmann_json::nlohmann_json
-        $<$<PLATFORM_ID:Windows>:winhttp>)
+        $<$<PLATFORM_ID:Windows>:winhttp;ws2_32>)
 elseif(LIBTORRENT_FOUND AND LIBTORRENT_LIB)
     target_include_directories(torrent-dl PRIVATE ${LIBTORRENT_INCLUDE_DIR})
     target_link_libraries(torrent-dl PRIVATE
         ${LIBTORRENT_LIB}
         ftxui::screen ftxui::dom ftxui::component
         nlohmann_json::nlohmann_json
-        $<$<PLATFORM_ID:Windows>:winhttp>)
+        $<$<PLATFORM_ID:Windows>:winhttp;ws2_32>)
 elseif(LIBTORRENT_FOUND)
     target_include_directories(torrent-dl PRIVATE ${LIBTORRENT_INCLUDE_DIRS})
     target_link_directories(torrent-dl PRIVATE ${LIBTORRENT_LIBRARY_DIRS})
@@ -114,7 +112,7 @@ elseif(LIBTORRENT_FOUND)
         ${LIBTORRENT_LIBRARIES}
         ftxui::screen ftxui::dom ftxui::component
         nlohmann_json::nlohmann_json
-        $<$<PLATFORM_ID:Windows>:winhttp>)
+        $<$<PLATFORM_ID:Windows>:winhttp;ws2_32>)
     target_compile_options(torrent-dl PRIVATE ${LIBTORRENT_CFLAGS_OTHER})
 endif()
 

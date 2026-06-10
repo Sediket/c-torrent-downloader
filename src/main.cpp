@@ -10,7 +10,12 @@
 #include <algorithm>
 
 #ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 #endif
 
@@ -19,6 +24,7 @@
 #include <libtorrent/torrent_handle.hpp>
 #include <libtorrent/torrent_info.hpp>
 #include <libtorrent/magnet_uri.hpp>
+#include <libtorrent/load_torrent.hpp>
 #include <libtorrent/error_code.hpp>
 
 #include "ftxui/component/component.hpp"
@@ -127,13 +133,14 @@ int main(int argc, char *argv[])
             }
             atp.save_path = g_save_path;
         } else {
-            auto ti = std::make_shared<lt::torrent_info>(source, ec);
-            if (ec) {
-                fprintf(stderr, "Failed to load torrent file: %s\n", ec.message().c_str());
+            try {
+                atp = lt::load_torrent_file(source);
+            } catch (std::exception const &e) {
+                fprintf(stderr, "Failed to load torrent file: %s\n", e.what());
                 return 1;
             }
-            atp.ti       = ti;
-            cli_entry.name = ti->name();
+            atp.save_path = g_save_path;
+            cli_entry.name = atp.ti->name();
         }
 
         lt::torrent_handle h = ses.add_torrent(std::move(atp), ec);

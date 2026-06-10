@@ -86,7 +86,7 @@ static inline void run_lt_dispatch(ScreenInteractive &screen, lt::session &ses)
                     g_downloads[idx].num_peers    = st.num_peers;
                     g_downloads[idx].total_done   = st.total_wanted_done;
                     g_downloads[idx].total_wanted = st.total_wanted;
-                    if (st.has_metadata && g_downloads[idx].name.empty())
+                    if (g_downloads[idx].name.empty() && !st.name.empty())
                         g_downloads[idx].name = st.name;
                     switch (st.state) {
                         case lt::torrent_status::checking_files:

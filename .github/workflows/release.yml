@@ -10,7 +10,7 @@ jobs:
     name: Build (Linux)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y libtorrent-rasterbar-dev cmake build-essential
@@ -22,7 +22,7 @@ jobs:
         run: cmake --build build --config Release
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: torrent-dl-linux
           path: build/torrent-dl
@@ -31,7 +31,7 @@ jobs:
     name: Build (Windows)
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install libtorrent via vcpkg
         run: |
@@ -49,37 +49,53 @@ jobs:
         run: cmake --build build --config Release
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: torrent-dl-windows
           path: build\Release\torrent-dl.exe
 
-  release:
-    name: Publish Release
-    needs: [build-linux, build-windows]
+  # The publish jobs are independent: each one only needs its own platform's
+  # build, so a failure on one OS never blocks the other OS from releasing.
+  # release-windows additionally waits for release-linux (even if it was
+  # skipped) so the two jobs never race to create the same GitHub release.
+  release-linux:
+    name: Publish Release (Linux)
+    needs: build-linux
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - name: Download Linux binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: torrent-dl-linux
           path: dist/linux
 
+      - name: Make Linux binary executable
+        run: chmod +x dist/linux/torrent-dl
+
+      - name: Create or update release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist/linux/torrent-dl
+          generate_release_notes: true
+
+  release-windows:
+    name: Publish Release (Windows)
+    needs: [build-windows, release-linux]
+    if: ${{ !cancelled() && needs.build-windows.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
       - name: Download Windows binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: torrent-dl-windows
           path: dist/windows
 
-      - name: Make Linux binary executable
-        run: chmod +x dist/linux/torrent-dl
-
-      - name: Create release
-        uses: softprops/action-gh-release@v2
+      - name: Create or update release
+        uses: softprops/action-gh-release@v3
         with:
-          files: |
-            dist/linux/torrent-dl
-            dist/windows/torrent-dl.exe
+          files: dist/windows/torrent-dl.exe
           generate_release_notes: true
