@@ -50,7 +50,10 @@ static inline void run_lt_dispatch(ScreenInteractive &screen, lt::session &ses)
         ses.pop_alerts(&alerts);
 
         for (lt::alert *a : alerts) {
-            auto *ta = lt::alert_cast<lt::torrent_alert>(a);
+            // alert_cast<> only works on leaf alert types in libtorrent 2.0
+            // (base classes lost their alert_type member with the deprecated
+            // API); dynamic_cast is the supported way to match the base class.
+            auto *ta = dynamic_cast<lt::torrent_alert *>(a);
             if (!ta) continue;
             lt::torrent_handle ah = ta->handle;
 
